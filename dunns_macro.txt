@@ -1,0 +1,135 @@
+/*
+SAS Macro for Dunn's Test
+Based on Procedure 1 in (Dunn, 1964).
+
+dsn = dataset name
+group = name of column containing the group ID for each observation
+endpoint = name of column for endpoint being analyzed
+control = the group ID for the control group
+side = 2, U, or L
+  - 2: Treatment != Control
+  - U: Treatment > Control
+  - L: Treatment < Control
+*/
+
+title1 "Dunn's Test for SAS";
+
+%macro analyze(dsn, group, endpoint, control, side);
+	title2 "Endpoint = &endpoint";
+
+	/* remove missing */
+	data &dsn;
+		set &dsn;
+		miss = missing(&endpoint);
+		if miss=0 then
+			output;
+		drop miss;
+	run;
+
+	/* add rank - ties are averaged*/
+	proc rank data=&dsn out=rnk_tbl;
+		var &endpoint;
+		ranks rank;
+
+	proc sort data=rnk_tbl;
+		by &group;
+
+	/* calculate summary values of ranks */
+	proc summary data=rnk_tbl;
+		class &group;
+		var rank;
+		output out=res(where=(_type_=1)) mean=meanranki sum=Ti n=ni;
+	run;
+
+	/* create variables for calculation */
+	data _null_;
+		set res end=last;
+
+		/* save control values */
+		if &group="&control" then
+			do;
+				call symput('t_ctrl', Ti);
+				call symput('n_ctrl', ni);
+			end;
+		else n_comp + 1;
+		cum_N + ni;
+
+		/* save number of obs and number of comparisons*/
+		if last then
+			do;
+				call symput('N', cum_N);
+				call symput('n_comp',n_comp);
+			end;
+	run;
+
+	/* count occurences of each rank */
+	proc means data=rnk_tbl N noprint;
+		class rank;
+		var rank;
+		output out=rnk_ct(where=(_type_=1)) n=n;
+	run;
+
+	/* calculate tie adjustment */
+	data rnk_ct;
+		set rnk_ct end=last;
+		cum_sum + ((n**3)-n);
+
+		if last then
+			call symput('tie_adj', cum_sum/(12*(&N-1)));
+	run;
+
+	/* add values to results table */
+	data res;
+		set res;
+
+		if &group ne "&control" then
+			do;
+				ym=meanranki-&t_ctrl/&n_ctrl;
+				se=sqrt(((&N*(&N+1)/12)-&tie_adj) * ((1/ni) + (1/&n_ctrl)));
+				comp=trim(&group) || " - &control";
+				z=ym/se;
+
+				/*Side = L; H_a: Trt < Ctrl*/
+				if upcase("&side")="L" then
+					p=cdf("normal", z);
+				/*Side = U; H_a: Trt > Ctrl*/
+				if upcase("&side")="U" then
+					p=1-cdf("normal", z);
+				if "&side"="2" then
+					p=(1-cdf("normal",abs(z)))*2;
+				p_adj=1-(1-p)**&n_comp;
+				if p_adj>1 then
+					p_adj=1;
+			end;
+	run;
+
+	/* Print calculated variables to log */
+	%put N=%trim(%left(&N));
+	%put t_ctrl=%trim(%left(&t_ctrl));
+	%put n_ctrl=%trim(%left(&n_ctrl));
+	%put tie_adj=%trim(%left(&tie_adj));
+	%put n_comp=%trim(%left(&n_comp));
+
+	proc print data=res noobs label;
+		var &group Ti ni meanranki;
+		label 
+			Ti='Sum of Ranks'
+			ni='Sample Size'
+			meanranki='Mean Rank';
+		title3 "Rank Summary by &group";
+
+	proc print data=res noobs label;
+		var comp ym se z p_adj;
+		where not missing(comp);
+		label comp = 'Comparison'
+			ym='Difference of Mean Rank'
+			se='Standard Error'
+			p_adj='p';
+		title3 "Dunn's Test (&side sided test)";
+	run;
+
+%mend;
+
+%analyze(dataset_name, group, endpoint1, 1, side);
+
+title;
